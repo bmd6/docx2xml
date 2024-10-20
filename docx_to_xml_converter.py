@@ -3,19 +3,18 @@
 docx_to_xml_converter.py
 
 A Python module to convert .docx files to XML format.
-Enhanced to handle non-breaking spaces, section breaks, page breaks, and tables.
-Designed with modularity, robustness, and extensibility in mind.
+Handles section headers with different levels, paragraphs (including step numbers and letters),
+and tables. Omits review comments and tracked changes for simplicity.
 
-Author: OpenAI ChatGPT
-Date: 2024-04-27
+Date: 2024-10-20
 """
 
 import os
 import sys
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from docx import Document
-from docx.oxml.ns import qn
+from docx.enum.style import WD_STYLE_TYPE
 import xml.etree.ElementTree as ET
 
 # Configure logging
@@ -44,12 +43,8 @@ logger.addHandler(fh)
 class DocxParser:
     """
     A class to parse .docx files and extract their contents, including
-    paragraphs, tables, and special elements like non-breaking spaces,
-    section breaks, and page breaks.
+    paragraphs, tables, and section headers.
     """
-
-    # Define the namespace mapping as a class variable
-    NAMESPACE = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 
     def __init__(self, filepath: str):
         """
@@ -82,9 +77,9 @@ class DocxParser:
     def parse_document(self) -> Dict[str, Any]:
         """
         Parses the loaded document and extracts its content, including
-        paragraphs and tables.
+        elements and tables.
 
-        :return: A dictionary containing parsed paragraphs and tables.
+        :return: A dictionary containing parsed elements and tables.
         :raises Exception: If the document is not loaded or cannot be parsed.
         """
         logger.debug("Starting to parse the document.")
@@ -93,92 +88,59 @@ class DocxParser:
             raise Exception("Document not loaded. Call load_document() first.")
 
         parsed_content = {
-            'paragraphs': self.parse_paragraphs(),
+            'elements': self.parse_elements(),
             'tables': self.parse_tables()
         }
         logger.info("Document parsing completed successfully.")
         return parsed_content
 
-    def parse_paragraphs(self) -> List[Dict[str, Any]]:
+    def parse_elements(self) -> List[Dict[str, Any]]:
         """
-        Parses the paragraphs in the document, detecting non-breaking spaces,
-        section breaks, and page breaks.
+        Parses all elements in the document in order, identifying whether
+        each is a header or a paragraph.
 
-        :return: A list of dictionaries containing parsed paragraph content.
+        :return: A list of dictionaries containing parsed elements.
         """
-        logger.debug("Parsing paragraphs.")
-        parsed_paragraphs = []
-        for para in self.document.paragraphs:
-            para_dict = {
-                'text_elements': self.parse_text_runs(para),
-                'style': para.style.name,
-                'breaks': self.detect_paragraph_breaks(para)
-            }
-            parsed_paragraphs.append(para_dict)
-            logger.debug(f"Parsed paragraph: {para_dict}")
-        return parsed_paragraphs
+        logger.debug("Parsing all elements in the document.")
+        parsed_elements = []
+        total_paragraphs = len(self.document.paragraphs)
+        logger.info(f"Total paragraphs to parse: {total_paragraphs}")
 
-    def parse_text_runs(self, para) -> List[Dict[str, Union[str, bool]]]:
-        """
-        Parses the runs within a paragraph to detect formatting and non-breaking spaces.
+        for idx, para in enumerate(self.document.paragraphs, start=1):
+            para_text = para.text.strip()
+            if not para_text:
+                logger.debug(f"Encountered an empty paragraph at index {idx}. Skipping.")
+                continue  # Skip empty paragraphs
 
-        :param para: A paragraph object from python-docx.
-        :return: A list of dictionaries representing text elements.
-        """
-        text_elements = []
-        for run in para.runs:
-            # Detect non-breaking spaces
-            text = run.text
-            if '\u00A0' in text:
-                parts = text.split('\u00A0')
-                for i, part in enumerate(parts):
-                    if part:
-                        text_elements.append({
-                            'text': part,
-                            'bold': run.bold or False,
-                            'italic': run.italic or False,
-                            'underline': run.underline or False,
-                            'non_breaking_space': False
-                        })
-                    if i < len(parts) - 1:
-                        text_elements.append({
-                            'text': '',
-                            'bold': False,
-                            'italic': False,
-                            'underline': False,
-                            'non_breaking_space': True
-                        })
-            else:
-                text_elements.append({
-                    'text': text,
-                    'bold': run.bold or False,
-                    'italic': run.italic or False,
-                    'underline': run.underline or False,
-                    'non_breaking_space': False
+            # Check if the paragraph is a header
+            style = para.style
+            if style.type == WD_STYLE_TYPE.PARAGRAPH and style.name.startswith('Heading'):
+                # Extract header level
+                try:
+                    level = int(style.name.split(' ')[1])
+                except (IndexError, ValueError):
+                    level = 1  # Default to level 1 if parsing fails
+                    logger.warning(f"Unable to determine header level for style: {style.name}. Defaulting to level 1.")
+                parsed_elements.append({
+                    'type': 'header',
+                    'level': level,
+                    'text': para_text
                 })
-        return text_elements
+                logger.debug(f"Parsed Header level {level}: {para_text}")
+            else:
+                # Regular paragraph
+                parsed_elements.append({
+                    'type': 'paragraph',
+                    'id': str(idx),
+                    'text': para_text
+                })
+                logger.debug(f"Parsed Paragraph {idx}: {para_text}")
 
-    def detect_paragraph_breaks(self, para) -> List[str]:
-        """
-        Detects section breaks and page breaks within a paragraph.
+            # Provide progress feedback every 10 paragraphs
+            if idx % 10 == 0 or idx == total_paragraphs:
+                logger.info(f"Parsed {idx}/{total_paragraphs} paragraphs.")
 
-        :param para: A paragraph object from python-docx.
-        :return: A list of break types detected in the paragraph.
-        """
-        breaks = []
-        for run in para.runs:
-            # Access the underlying XML element using _element
-            for br in run._element.findall('.//w:br', namespaces=self.NAMESPACE):
-                br_type = br.get(qn('w:type'))
-                if br_type == 'page':
-                    breaks.append('page_break')
-                elif br_type in ('column', 'text_wrapping'):
-                    # Additional break types can be handled here
-                    pass
-                else:
-                    # Default or unknown break types
-                    breaks.append('section_break')
-        return breaks
+        return parsed_elements
 
     def parse_tables(self) -> List[Dict[str, Any]]:
         """
@@ -188,26 +150,41 @@ class DocxParser:
         """
         logger.debug("Parsing tables.")
         parsed_tables = []
-        for table in self.document.tables:
+        total_tables = len(self.document.tables)
+        logger.info(f"Total tables to parse: {total_tables}")
+
+        for tbl_idx, table in enumerate(self.document.tables, start=1):
             table_dict = {
+                'id': str(tbl_idx),
                 'rows': []
             }
-            for row in table.rows:
+            for row_idx, row in enumerate(table.rows, start=1):
                 row_data = []
-                for cell in row.cells:
+                for cell_idx, cell in enumerate(row.cells, start=1):
                     # Concatenate all paragraph texts within the cell, separated by newlines
-                    cell_text = '\n'.join([para.text for para in cell.paragraphs])
-                    row_data.append(cell_text)
-                table_dict['rows'].append(row_data)
+                    cell_text = '\n'.join([para.text.strip() for para in cell.paragraphs if para.text.strip()])
+                    row_data.append({
+                        'id': str(cell_idx),
+                        'text': cell_text
+                    })
+                table_dict['rows'].append({
+                    'id': str(row_idx),
+                    'cells': row_data
+                })
             parsed_tables.append(table_dict)
-            logger.debug(f"Parsed table: {table_dict}")
+            logger.debug(f"Parsed Table {tbl_idx}.")
+            
+            # Provide progress feedback every 5 tables
+            if tbl_idx % 5 == 0 or tbl_idx == total_tables:
+                logger.info(f"Parsed {tbl_idx}/{total_tables} tables.")
+
         return parsed_tables
 
 
 class XMLConverter:
     """
     A class to convert parsed document data into an XML structure,
-    including paragraphs, non-breaking spaces, breaks, and tables.
+    including headers and paragraphs, and tables.
     """
 
     def __init__(self, data: Dict[str, Any]):
@@ -228,50 +205,30 @@ class XMLConverter:
         logger.debug("Starting to build XML structure.")
         root = ET.Element('Document')
 
-        # Add Paragraphs
-        paragraphs_element = ET.SubElement(root, 'Paragraphs')
-        for idx, para in enumerate(self.data.get('paragraphs', []), start=1):
-            para_element = ET.SubElement(paragraphs_element, 'Paragraph', id=str(idx))
-
-            # Add Style
-            style_element = ET.SubElement(para_element, 'Style')
-            style_element.text = para['style']
-
-            # Add Text Elements
-            text_elements_element = ET.SubElement(para_element, 'TextElements')
-            for text_idx, text_element in enumerate(para['text_elements'], start=1):
-                if text_element['non_breaking_space']:
-                    nbsp_element = ET.SubElement(text_elements_element, 'NonBreakingSpace', id=str(text_idx))
-                    nbsp_element.text = ''
-                else:
-                    run_attributes = {
-                        'bold': str(text_element['bold']),
-                        'italic': str(text_element['italic']),
-                        'underline': str(text_element['underline'])
-                    }
-                    run_element = ET.SubElement(text_elements_element, 'Run', **run_attributes)
-                    run_element.text = text_element['text']
-
-            # Add Breaks if any
-            if para['breaks']:
-                breaks_element = ET.SubElement(para_element, 'Breaks')
-                for break_type in para['breaks']:
-                    # Capitalize the first letter for XML element naming
-                    break_element = ET.SubElement(breaks_element, f"{break_type.capitalize()}")
-                    break_element.text = 'True'
-
-            logger.debug(f"Added XML for paragraph {idx}: {para}")
+        # Add Elements (Headers and Paragraphs)
+        elements_element = ET.SubElement(root, 'Elements')
+        for element in self.data.get('elements', []):
+            if element['type'] == 'header':
+                header_element = ET.SubElement(elements_element, 'Header', level=str(element['level']))
+                header_element.text = element['text']
+                logger.debug(f"Added Header level {element['level']}: {element['text']}")
+            elif element['type'] == 'paragraph':
+                para_element = ET.SubElement(elements_element, 'Paragraph', id=element['id'])
+                para_element.text = element['text']
+                logger.debug(f"Added Paragraph {element['id']}: {element['text']}")
+            else:
+                logger.warning(f"Unknown element type: {element['type']}")
 
         # Add Tables
         tables_element = ET.SubElement(root, 'Tables')
-        for tbl_idx, table in enumerate(self.data.get('tables', []), start=1):
-            table_element = ET.SubElement(tables_element, 'Table', id=str(tbl_idx))
-            for row_idx, row in enumerate(table['rows'], start=1):
-                row_element = ET.SubElement(table_element, 'Row', id=str(row_idx))
-                for cell_idx, cell in enumerate(row, start=1):
-                    cell_element = ET.SubElement(row_element, 'Cell', id=str(cell_idx))
-                    cell_element.text = cell
-            logger.debug(f"Added XML for table {tbl_idx}: {table}")
+        for table in self.data.get('tables', []):
+            table_element = ET.SubElement(tables_element, 'Table', id=table['id'])
+            for row in table['rows']:
+                row_element = ET.SubElement(table_element, 'Row', id=row['id'])
+                for cell in row['cells']:
+                    cell_element = ET.SubElement(row_element, 'Cell', id=cell['id'])
+                    cell_element.text = cell['text']
+            logger.debug(f"Added Table {table['id']}.")
 
         logger.info("XML structure built successfully.")
         return root
