@@ -1,327 +1,401 @@
-#!/usr/bin/env python3
-"""
-docx_to_xml_converter.py
-
-A Python module to convert .docx files to XML format.
-Handles section headers with different levels, paragraphs (including step numbers and letters),
-and tables. Omits review comments and tracked changes for simplicity.
-
-Date: 2024-10-20
-"""
-
 import os
 import sys
 import logging
-from typing import Any, Dict, List, Optional
-from docx import Document
-from docx.enum.style import WD_STYLE_TYPE
 import xml.etree.ElementTree as ET
+from xml.dom import minidom
+from typing import Optional, Dict, List
+import pythoncom
+import win32com.client
+import re
+from dataclasses import dataclass, field
 
 # Configure logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed logging
-
-# Create console handler with a higher log level
-ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)  # Change to DEBUG to see detailed logs on console
-
-# Create file handler which logs even debug messages
-fh = logging.FileHandler('docx_to_xml_converter.log')
-fh.setLevel(logging.DEBUG)
-
-# Create formatter and add it to the handlers
-formatter = logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-ch.setFormatter(formatter)
-fh.setFormatter(formatter)
-
-# Add the handlers to the logger
-logger.addHandler(ch)
-logger.addHandler(fh)
-
-
-class DocxParser:
+def setup_logging(verbose: bool = False):
     """
-    A class to parse .docx files and extract their contents, including
-    paragraphs, tables, and section headers.
+    Sets up logging to file and console.
+
+    :param verbose: If True, sets console logging to INFO level. Else, WARNING.
     """
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
 
-    def __init__(self, filepath: str):
-        """
-        Initializes the DocxParser with the path to the .docx file.
+    # File handler for detailed logs
+    file_handler = logging.FileHandler('docx_to_xml.log', mode='a', encoding='utf-8')
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
 
-        :param filepath: Path to the .docx file to be parsed.
-        """
-        self.filepath = filepath
-        self.document = None
-        logger.debug(f"DocxParser initialized with file: {self.filepath}")
+    # Console handler for status updates
+    console_handler = logging.StreamHandler(sys.stdout)
+    if verbose:
+        console_level = logging.INFO
+    else:
+        console_level = logging.WARNING
+    console_formatter = logging.Formatter('%(levelname)s: %(message)s')
+    console_handler.setFormatter(console_formatter)
+    console_handler.setLevel(console_level)
+    logger.addHandler(console_handler)
 
-    def load_document(self) -> None:
-        """
-        Loads the .docx document.
+@dataclass
+class ListItem:
+    number: str
+    text: str
+    level: int
+    children: List['ListItem'] = field(default_factory=list)
 
-        :raises FileNotFoundError: If the file does not exist.
-        :raises Exception: If the file cannot be opened as a .docx.
-        """
-        logger.debug("Attempting to load the .docx document.")
-        if not os.path.isfile(self.filepath):
-            logger.error(f"File not found: {self.filepath}")
-            raise FileNotFoundError(f"File not found: {self.filepath}")
-        try:
-            self.document = Document(self.filepath)
-            logger.info(f"Successfully loaded document: {self.filepath}")
-        except Exception as e:
-            logger.error(f"Error loading document: {e}")
-            raise
-
-    def parse_document(self) -> Dict[str, Any]:
-        """
-        Parses the loaded document and extracts its content, including
-        elements and tables.
-
-        :return: A dictionary containing parsed elements and tables.
-        :raises Exception: If the document is not loaded or cannot be parsed.
-        """
-        logger.debug("Starting to parse the document.")
-        if self.document is None:
-            logger.error("Document not loaded. Call load_document() first.")
-            raise Exception("Document not loaded. Call load_document() first.")
-
-        parsed_content = {
-            'elements': self.parse_elements(),
-            'tables': self.parse_tables()
-        }
-        logger.info("Document parsing completed successfully.")
-        return parsed_content
-
-    def parse_elements(self) -> List[Dict[str, Any]]:
-        """
-        Parses all elements in the document in order, identifying whether
-        each is a header or a paragraph.
-
-        :return: A list of dictionaries containing parsed elements.
-        """
-        logger.debug("Parsing all elements in the document.")
-        parsed_elements = []
-        total_paragraphs = len(self.document.paragraphs)
-        logger.info(f"Total paragraphs to parse: {total_paragraphs}")
-
-        for idx, para in enumerate(self.document.paragraphs, start=1):
-            para_text = para.text.strip()
-            if not para_text:
-                logger.debug(f"Encountered an empty paragraph at index {idx}. Skipping.")
-                continue  # Skip empty paragraphs
-
-            # Check if the paragraph is a header
-            style = para.style
-            if style.type == WD_STYLE_TYPE.PARAGRAPH and style.name.startswith('Heading'):
-                # Extract header level
-                try:
-                    level = int(style.name.split(' ')[1])
-                except (IndexError, ValueError):
-                    level = 1  # Default to level 1 if parsing fails
-                    logger.warning(f"Unable to determine header level for style: {style.name}. Defaulting to level 1.")
-                parsed_elements.append({
-                    'type': 'header',
-                    'level': level,
-                    'text': para_text
-                })
-                logger.debug(f"Parsed Header level {level}: {para_text}")
-            else:
-                # Regular paragraph
-                parsed_elements.append({
-                    'type': 'paragraph',
-                    'id': str(idx),
-                    'text': para_text
-                })
-                logger.debug(f"Parsed Paragraph {idx}: {para_text}")
-
-            # Provide progress feedback every 10 paragraphs
-            if idx % 10 == 0 or idx == total_paragraphs:
-                logger.info(f"Parsed {idx}/{total_paragraphs} paragraphs.")
-
-        return parsed_elements
-
-    def parse_tables(self) -> List[Dict[str, Any]]:
-        """
-        Parses the tables in the document.
-
-        :return: A list of dictionaries containing parsed table data.
-        """
-        logger.debug("Parsing tables.")
-        parsed_tables = []
-        total_tables = len(self.document.tables)
-        logger.info(f"Total tables to parse: {total_tables}")
-
-        for tbl_idx, table in enumerate(self.document.tables, start=1):
-            table_dict = {
-                'id': str(tbl_idx),
-                'rows': []
-            }
-            for row_idx, row in enumerate(table.rows, start=1):
-                row_data = []
-                for cell_idx, cell in enumerate(row.cells, start=1):
-                    # Concatenate all paragraph texts within the cell, separated by newlines
-                    cell_text = '\n'.join([para.text.strip() for para in cell.paragraphs if para.text.strip()])
-                    row_data.append({
-                        'id': str(cell_idx),
-                        'text': cell_text
-                    })
-                table_dict['rows'].append({
-                    'id': str(row_idx),
-                    'cells': row_data
-                })
-            parsed_tables.append(table_dict)
-            logger.debug(f"Parsed Table {tbl_idx}.")
-            
-            # Provide progress feedback every 5 tables
-            if tbl_idx % 5 == 0 or tbl_idx == total_tables:
-                logger.info(f"Parsed {tbl_idx}/{total_tables} tables.")
-
-        return parsed_tables
-
-
-class XMLConverter:
+class DocxToXmlConverter:
     """
-    A class to convert parsed document data into an XML structure,
-    including headers and paragraphs, and tables.
-    """
-
-    def __init__(self, data: Dict[str, Any]):
-        """
-        Initializes the XMLConverter with parsed data.
-
-        :param data: Parsed data from the .docx file.
-        """
-        self.data = data
-        logger.debug("XMLConverter initialized with parsed data.")
-
-    def build_xml(self) -> ET.Element:
-        """
-        Builds the XML ElementTree from the parsed data.
-
-        :return: The root XML element.
-        """
-        logger.debug("Starting to build XML structure.")
-        root = ET.Element('Document')
-
-        # Add Elements (Headers and Paragraphs)
-        elements_element = ET.SubElement(root, 'Elements')
-        for element in self.data.get('elements', []):
-            if element['type'] == 'header':
-                header_element = ET.SubElement(elements_element, 'Header', level=str(element['level']))
-                header_element.text = element['text']
-                logger.debug(f"Added Header level {element['level']}: {element['text']}")
-            elif element['type'] == 'paragraph':
-                para_element = ET.SubElement(elements_element, 'Paragraph', id=element['id'])
-                para_element.text = element['text']
-                logger.debug(f"Added Paragraph {element['id']}: {element['text']}")
-            else:
-                logger.warning(f"Unknown element type: {element['type']}")
-
-        # Add Tables
-        tables_element = ET.SubElement(root, 'Tables')
-        for table in self.data.get('tables', []):
-            table_element = ET.SubElement(tables_element, 'Table', id=table['id'])
-            for row in table['rows']:
-                row_element = ET.SubElement(table_element, 'Row', id=row['id'])
-                for cell in row['cells']:
-                    cell_element = ET.SubElement(row_element, 'Cell', id=cell['id'])
-                    cell_element.text = cell['text']
-            logger.debug(f"Added Table {table['id']}.")
-
-        logger.info("XML structure built successfully.")
-        return root
-
-    def save_xml(self, root: ET.Element, output_path: str) -> None:
-        """
-        Saves the XML ElementTree to a file.
-
-        :param root: The root XML element.
-        :param output_path: Path where the XML file will be saved.
-        :raises Exception: If the file cannot be written.
-        """
-        logger.debug(f"Attempting to save XML to: {output_path}")
-        try:
-            tree = ET.ElementTree(root)
-            tree.write(output_path, encoding='utf-8', xml_declaration=True)
-            logger.info(f"XML file saved successfully at: {output_path}")
-        except Exception as e:
-            logger.error(f"Error saving XML file: {e}")
-            raise
-
-
-class Converter:
-    """
-    A facade class to convert a .docx file to an XML file, handling parsing and conversion.
+    A class to convert a DOCX file to an XML file, extracting multi-level lists and section headers.
     """
 
     def __init__(self, input_path: str, output_path: Optional[str] = None):
         """
-        Initializes the Converter with input and output paths.
+        Initializes the converter with input and output paths.
 
-        :param input_path: Path to the input .docx file.
+        :param input_path: Path to the input DOCX file.
         :param output_path: Path to the output XML file. If None, replaces .docx with .xml.
         """
         self.input_path = input_path
-        if output_path:
-            self.output_path = output_path
-        else:
-            base, _ = os.path.splitext(input_path)
-            self.output_path = f"{base}.xml"
-        logger.debug(f"Converter initialized with input: {self.input_path}, output: {self.output_path}")
+        self.output_path = output_path or self._generate_output_path()
+        self.word_app = None
 
-    def convert(self) -> None:
+    def _generate_output_path(self) -> str:
         """
-        Performs the conversion from .docx to XML.
+        Generates the output XML file path based on the input DOCX path.
 
-        :raises Exception: If any step in the conversion fails.
+        :return: Output XML file path.
         """
-        logger.info(f"Starting conversion: {self.input_path} -> {self.output_path}")
-        parser = DocxParser(self.input_path)
-        parser.load_document()
-        parsed_data = parser.parse_document()
+        base, _ = os.path.splitext(self.input_path)
+        return f"{base}.xml"
 
-        converter = XMLConverter(parsed_data)
-        xml_root = converter.build_xml()
-        converter.save_xml(xml_root, self.output_path)
-        logger.info("Conversion completed successfully.")
+    def _initialize_word(self):
+        """
+        Initializes the Word application object.
 
+        Raises:
+            Exception: If Word application cannot be initialized.
+        """
+        try:
+            logging.info("Initializing Word application...")
+            pythoncom.CoInitialize()
+            self.word_app = win32com.client.Dispatch("Word.Application")
+            self.word_app.Visible = True
+            self.word_app.DisplayAlerts = 0  # wdAlertsNone
+            logging.info("Word application initialized successfully.")
+        except Exception as e:
+            logging.error(f"Failed to initialize Word application: {e}")
+            raise
 
-def convert_docx_to_xml(input_path: str, output_path: Optional[str] = None) -> None:
-    """
-    Converts a .docx file to an XML file.
+    def _cleanup_word(self):
+        """
+        Closes the Word application.
+        """
+        try:
+            if self.word_app:
+                logging.info("Closing Word application...")
+                self.word_app.Quit()
+                logging.info("Word application closed.")
+        except Exception as e:
+            logging.warning(f"Error while closing Word application: {e}")
 
-    :param input_path: Path to the input .docx file.
-    :param output_path: Path to the output XML file. If None, replaces .docx with .xml.
-    """
-    try:
-        converter = Converter(input_path, output_path)
-        converter.convert()
-    except Exception as e:
-        logger.exception(f"Failed to convert {input_path} to XML. Error: {e}")
-        raise
+    def convert(self):
+        """
+        Performs the conversion from DOCX to XML.
+        """
+        try:
+            self._initialize_word()
+            logging.info(f"Opening DOCX file: {self.input_path}")
+            try:
+                doc = self.word_app.Documents.Open(
+                    FileName=self.input_path,
+                    ReadOnly=True,
+                    AddToRecentFiles=False,
+                    Visible=False
+                )
+                logging.info("DOCX file opened successfully.")
+            except Exception as e:
+                logging.error(f"Failed to open DOCX file: {e}")
+                raise
 
+            content = self._extract_content(doc)
+            logging.info("Content extraction completed.")
+
+            root = self._build_xml(content)
+            logging.info("XML structure built successfully.")
+
+            xml_str = self._prettify_xml(root)
+            logging.info("XML string prepared for writing.")
+
+            logging.info(f"Writing XML to file: {self.output_path}")
+            try:
+                with open(self.output_path, 'w', encoding='utf-8') as f:
+                    f.write(xml_str)
+                logging.info("XML file written successfully.")
+            except Exception as e:
+                logging.error(f"Failed to write XML file: {e}")
+                raise
+
+            doc.Close(False)
+            logging.info("DOCX document closed.")
+
+        except Exception as e:
+            logging.error(f"An error occurred during conversion: {e}", exc_info=True)
+            raise
+        finally:
+            self._cleanup_word()
+
+    def _extract_content(self, doc) -> Dict[str, Dict[str, any]]:
+        """
+        Extracts headers and multi-level lists from the Word document.
+
+        :param doc: The opened Word document.
+        :return: Dictionary with headers as keys and their details (level and items) as values.
+        """
+        content = {}
+        current_header = None
+        current_header_level = 1
+        current_items = []
+        list_stack = []  # Stack to manage list hierarchy
+        total_paragraphs = doc.Paragraphs.Count
+        processed_paragraphs = 0
+
+        logging.info(f"Total paragraphs to process: {total_paragraphs}")
+
+        for para in doc.Paragraphs:
+            processed_paragraphs += 1
+            if processed_paragraphs % 50 == 0 or processed_paragraphs == total_paragraphs:
+                logging.info(f"Processed {processed_paragraphs}/{total_paragraphs} paragraphs.")
+
+            # Ignore if the paragraph is a revision or comment
+            if self._is_revision_or_comment(para):
+                continue
+
+            style = para.Style.NameLocal
+            text = para.Range.Text.strip()
+            logging.debug(f"Processing paragraph {processed_paragraphs}: Style='{style}', Text='{text}'")
+
+            if self._is_heading(style):
+                if current_header:
+                    # Add the previous header and its items (even if items are empty)
+                    content[current_header] = {
+                        'level': current_header_level,
+                        'items': current_items
+                    }
+                    logging.info(f"Added header: '{current_header}' with level {current_header_level} and {len(current_items)} list items.")
+                current_header = text
+                current_header_level = self._get_heading_level_from_style(style)
+                current_items = []
+                list_stack = []
+                logging.info(f"Detected header: '{current_header}' with level {current_header_level}")
+                continue
+
+            if not text:
+                continue
+
+            if para.Range.ListFormat.ListType != 0:  # 0 means no list
+                list_item = self._create_list_item(para)
+                if list_item:
+                    self._add_list_item_to_content(list_item, current_items, list_stack)
+            else:
+                # Handle non-list paragraphs if needed
+                continue
+
+        # Add the last header and its items (even if items are empty)
+        if current_header:
+            content[current_header] = {
+                'level': current_header_level,
+                'items': current_items
+            }
+            logging.info(f"Added header: '{current_header}' with level {current_header_level} and {len(current_items)} list items.")
+
+        logging.info("Completed content extraction.")
+        return content
+
+    def _is_revision_or_comment(self, para) -> bool:
+        """
+        Checks if the paragraph is a revision or a comment.
+
+        :param para: The paragraph object.
+        :return: True if it's a revision or comment, False otherwise.
+        """
+        try:
+            if para.Range.Revisions.Count > 0:
+                logging.debug("Paragraph is a revision; ignoring.")
+                return True
+            if para.Range.Comments.Count > 0:
+                logging.debug("Paragraph has comments; ignoring.")
+                return True
+        except Exception as e:
+            logging.warning(f"Failed to check revisions/comments: {e}")
+        return False
+
+    def _is_heading(self, style: str) -> bool:
+        """
+        Determines if the paragraph style is a heading.
+
+        :param style: The style name.
+        :return: True if it's a heading style, False otherwise.
+        """
+        return style.startswith('Heading')
+
+    def _get_heading_level_from_style(self, style: str) -> int:
+        """
+        Extracts the heading level from the style name.
+
+        :param style: The style name (e.g., 'Heading 1', 'Heading 2').
+        :return: Heading level as integer.
+        """
+        match = re.search(r'Heading\s+(\d+)', style, re.IGNORECASE)
+        if match:
+            level = int(match.group(1))
+            logging.debug(f"Extracted heading level: {level} from style '{style}'")
+            return level
+        logging.debug(f"Failed to extract heading level from style '{style}'. Defaulting to 1.")
+        return 1
+
+    def _create_list_item(self, para) -> Optional[ListItem]:
+        """
+        Creates a ListItem object from a list paragraph.
+
+        :param para: The paragraph object.
+        :return: ListItem object or None.
+        """
+        try:
+            text = para.Range.Text.strip()
+            level = para.Range.ListFormat.ListLevelNumber
+            list_string = para.Range.ListFormat.ListString
+
+            # Clean the text by removing the list marker
+            cleaned_text = re.sub(r'^\s*(?:\d+|[a-zA-Z])[).]\s*', '', text)
+
+            list_item = ListItem(
+                number=f"{list_string}",
+                text=cleaned_text,
+                level=level - 1  # Convert to 0-based indexing
+            )
+            logging.debug(f"Created ListItem: {list_item}")
+            return list_item
+        except Exception as e:
+            logging.warning(f"Failed to create ListItem: {e}")
+            return None
+
+    def _add_list_item_to_content(self, list_item: ListItem, current_items: List[ListItem], list_stack: List[ListItem]):
+        """
+        Adds a ListItem to the current_items list, handling hierarchy based on level.
+
+        :param list_item: The ListItem to add.
+        :param current_items: The current list of ListItems under the current header.
+        :param list_stack: Stack to manage current hierarchy levels.
+        """
+        try:
+            # Adjust the stack to the current level
+            while len(list_stack) > list_item.level:
+                popped = list_stack.pop()
+                logging.debug(f"Popped from stack: {popped.number}")
+
+            if list_item.level == 0:
+                current_items.append(list_item)
+                list_stack.append(list_item)
+                logging.info(f"Added ListItem to current_items: {list_item.number} {list_item.text}")
+            else:
+                if list_stack:
+                    parent = list_stack[-1]
+                    parent.children.append(list_item)
+                    list_stack.append(list_item)
+                    logging.info(f"Added ListItem as child to '{parent.number}': {list_item.number} {list_item.text}")
+                else:
+                    # If stack is empty, treat it as a top-level item
+                    current_items.append(list_item)
+                    list_stack.append(list_item)
+                    logging.info(f"Added ListItem to current_items (no parent): {list_item.number} {list_item.text}")
+        except Exception as e:
+            logging.warning(f"Failed to add ListItem to content: {e}")
+
+    def _build_xml(self, content: Dict[str, Dict[str, any]]) -> ET.Element:
+        """
+        Builds an XML Element from the extracted content.
+
+        :param content: Dictionary with headers as keys and their details as values.
+        :return: Root XML Element.
+        """
+        root = ET.Element('Document')
+
+        for header, details in content.items():
+            header_element = ET.SubElement(root, 'Header', attrib={'level': str(details['level'])})
+            header_element.text = header
+            logging.info(f"Added Header to XML: '{header}' with level {details['level']}")
+
+            for item in details['items']:
+                self._add_list_item_to_xml(header_element, item)
+
+        logging.info("XML structure built successfully.")
+        return root
+
+    def _add_list_item_to_xml(self, parent_xml: ET.Element, list_item: ListItem):
+        """
+        Recursively adds ListItem elements to the XML.
+
+        :param parent_xml: The parent XML element.
+        :param list_item: The ListItem to add.
+        """
+        try:
+            list_element = ET.SubElement(parent_xml, 'ListItem', attrib={
+                'level': str(list_item.level),
+                'marker': list_item.number
+            })
+            list_element.text = list_item.text
+            logging.info(f"Added ListItem to XML: {list_item.number} {list_item.text}")
+
+            for child in list_item.children:
+                self._add_list_item_to_xml(list_element, child)
+
+        except Exception as e:
+            logging.warning(f"Failed to add ListItem to XML: {e}")
+
+    def _prettify_xml(self, elem: ET.Element) -> str:
+        """
+        Returns a pretty-printed XML string for the Element.
+
+        :param elem: The root XML element.
+        :return: Pretty-printed XML string.
+        """
+        rough_string = ET.tostring(elem, 'utf-8')
+        reparsed = minidom.parseString(rough_string)
+        return reparsed.toprettyxml(indent="  ")
+
+def extract_requirements(text: str) -> List[str]:
+    """Extract requirement IDs from text."""
+    return re.findall(r'\[([^\]]+)\]', text)
 
 def main():
     """
-    The main function to execute when running the script directly.
-    Parses command-line arguments and performs the conversion.
+    Main function to execute the conversion. Parses command-line arguments for input and output paths.
     """
     import argparse
 
-    parser = argparse.ArgumentParser(description='Convert a .docx file to XML format.')
-    parser.add_argument('input', help='Path to the input .docx file.')
-    parser.add_argument('-o', '--output', help='Path to the output XML file.')
+    parser = argparse.ArgumentParser(description='Convert DOCX to XML, extracting lists and headers.')
+    parser.add_argument('input', help='Path to the input DOCX file.')
+    parser.add_argument('-o', '--output', help='Path to the output XML file. If not provided, replaces .docx with .xml.')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose output to the console.')
 
     args = parser.parse_args()
 
-    try:
-        convert_docx_to_xml(args.input, args.output)
-    except Exception as e:
-        logger.error(f"An error occurred during conversion: {e}")
+    # Setup logging with optional verbosity
+    setup_logging(verbose=args.verbose)
+
+    if not os.path.isfile(args.input):
+        logging.error(f"Input file does not exist: {args.input}")
+        print(f"Error: Input file does not exist: {args.input}")
         sys.exit(1)
 
+    converter = DocxToXmlConverter(input_path=args.input, output_path=args.output)
+    try:
+        logging.info("Starting conversion process...")
+        converter.convert()
+        print(f"Conversion successful. XML saved to: {converter.output_path}")
+    except Exception as e:
+        print(f"Conversion failed: {e}")
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
