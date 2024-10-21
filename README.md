@@ -10,7 +10,10 @@ Convert docx to XML for easier parsing and analysis.
 3. Running the script directly with an output path:<br>
 `python docx_to_xml_converter.py path/to/input.docx -o path/to/output.xml`
 
-4. Importing as a module:<br>
+4. Running the script with verbose logging
+`python docx_to_xml_converter.py path/to/input.docx -o path/to/output.xml` --verbose
+
+5. Importing as a module:<br>
 ```python
 from docx_to_xml_converter import convert_docx_to_xml
 input_file = 'path/to/input.docx'
