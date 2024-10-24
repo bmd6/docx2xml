@@ -161,17 +161,45 @@ class DocxToXmlConverter:
 
         logging.info(f"Total paragraphs to process: {total_paragraphs}")
 
+        def sanitize_text(text: str) -> str:
+            """
+            Sanitizes text by removing or replacing problematic Unicode characters.
+            """
+            # Remove control characters
+            text = ''.join(char for char in text if ord(char) >= 32 or char in '\n\t\r')
+
+            # Replace characters that are invalid in XML
+            text = text.replace('&', '&amp;')
+            text = text.replace('<', '&lt;')
+            text = text.replace('>', '&gt;')
+            text = text.replace('"', '&quot;')
+            text = text.replace("'", '&apos;')
+
+            # Replace other potentially problematic Unicode characters
+            text = text.replace('\u2018', "'")  # Left single quote
+            text = text.replace('\u2019', "'")  # Right single quote
+            text = text.replace('\u201C', '"')  # Left double quote
+            text = text.replace('\u201D', '"')  # Right double quote
+            text = text.replace('\u2013', '-')  # En dash
+            text = text.replace('\u2014', '--')  # Em dash
+            text = text.replace('\u2022', '*')  # Bullet point
+            text = text.replace('\u00A0', ' ')  # Non-breaking space
+            text = text.replace('\u2026', '...')  # Ellipsis
+            
+            return text
+
         for para in doc.Paragraphs:
             processed_paragraphs += 1
             if processed_paragraphs % 50 == 0 or processed_paragraphs == total_paragraphs:
                 logging.info(f"Processed {processed_paragraphs}/{total_paragraphs} paragraphs.")
 
             # Ignore if the paragraph is a revision or comment
-            if self._is_revision_or_comment(para):
-                continue
+            # Non-insignicant performance hit, commenting out as it may not be needed.
+            #if self._is_revision_or_comment(para):
+            #    continue
 
             style = para.Style.NameLocal
-            text = para.Range.Text.strip()
+            text = sanitize_text(para.Range.Text.strip())
             logging.debug(f"Processing paragraph {processed_paragraphs}: Style='{style}', Text='{text}'")
 
             if self._is_heading(style):
@@ -193,7 +221,7 @@ class DocxToXmlConverter:
                 continue
 
             if para.Range.ListFormat.ListType != 0:  # 0 means no list
-                list_item = self._create_list_item(para)
+                list_item = self._create_list_item(para, sanitize_text)
                 if list_item:
                     self._add_list_item_to_content(list_item, current_items, list_stack)
             else:
@@ -253,17 +281,18 @@ class DocxToXmlConverter:
         logging.debug(f"Failed to extract heading level from style '{style}'. Defaulting to 1.")
         return 1
 
-    def _create_list_item(self, para) -> Optional[ListItem]:
+    def _create_list_item(self, para, sanitize_func) -> Optional[ListItem]:
         """
         Creates a ListItem object from a list paragraph.
 
         :param para: The paragraph object.
+        :param sanitize_text: Function to sanitize the text.
         :return: ListItem object or None.
         """
         try:
-            text = para.Range.Text.strip()
+            text = sanitize_func(para.Range.Text.strip())
             level = para.Range.ListFormat.ListLevelNumber
-            list_string = para.Range.ListFormat.ListString
+            list_string = sanitize_func(para.Range.ListFormat.ListString)
 
             # Clean the text by removing the list marker
             cleaned_text = re.sub(r'^\s*(?:\d+|[a-zA-Z])[).]\s*', '', text)
